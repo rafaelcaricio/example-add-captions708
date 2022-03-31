@@ -15,13 +15,13 @@ fn main() -> eyre::Result<()> {
 
     let pipeline = gst::parse_launch(
         r#"
-        filesrc location=/Users/rafael.caricio/video.mkv ! matroskademux name=demuxer
+        uridecodebin name=demuxer uri=file:///Users/rafael.caricio/video.mkv
 
-        demuxer.video_0 ! decodebin name=video-decoder ! video/x-raw ! transcriberbin name=trans latency=30000
-        demuxer.audio_0 ! decodebin name=audio-decoder ! audio/x-raw ! trans.sink_audio
+        demuxer. ! video/x-raw ! transcriberbin name=trans latency=30000
+        demuxer. ! audio/x-raw ! trans.sink_audio
 
-         trans.src_video ! cea608overlay black-background=1 ! autovideosink
-         trans.src_audio ! autoaudiosink
+        trans.src_video ! cea608overlay black-background=1 ! autovideosink
+        trans.src_audio ! autoaudiosink
 
     "#,
     )?
