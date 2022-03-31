@@ -1,63 +1,28 @@
 use gst::prelude::*;
 use gstreamer_app as gst_app;
 use log::{debug, error, info, trace, warn};
-use serde_derive::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{Cursor, Write};
 use std::process;
-use std::sync::{Arc, Mutex};
-use tungstenite::{connect, Message};
-use url::Url;
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct Configuration {
-    config: ConfigInner,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-struct ConfigInner {
-    /// Sample rate the audio will be provided at.
-    sample_rate: i32,
-
-    /// Show time ranges of each word in the transcription.
-    words: bool,
-}
-
-impl Configuration {
-    pub fn new(sample_rate: i32) -> Self {
-        Self {
-            config: ConfigInner {
-                sample_rate,
-                // We always want to receive the words with their time ranges.
-                words: true,
-            },
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct Transcript {
-    pub result: Vec<WordInfo>,
-    pub text: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct WordInfo {
-    #[serde(rename = "conf")]
-    pub confidence: f64,
-    pub word: String,
-    pub start: f64,
-    pub end: f64,
-}
 
 fn main() -> eyre::Result<()> {
     pretty_env_logger::init_timed();
     gst::init()?;
 
+    gstrstextwrap::plugin_register_static()?;
+    gstrusoto::plugin_register_static()?;
+    gstrsclosedcaption::plugin_register_static()?;
+    gstvosk::plugin_register_static()?;
+
     let pipeline = gst::parse_launch(
         r#"
-        uridecodebin uri=file:///Users/rafael.caricio/video.mkv name=dec dec.src_1 ! audio/x-raw !
-        audioconvert ! audiorate ! audioresample ! audio/x-raw,format=S16LE,rate=16000,channels=1 ! appsink name=sink
+        filesrc location=/Users/rafael.caricio/video.mkv ! matroskademux name=demuxer
+
+        demuxer.video_0 ! decodebin name=video-decoder ! video/x-raw ! transcriberbin name=trans latency=30000
+        demuxer.audio_0 ! decodebin name=audio-decoder ! audio/x-raw ! trans.sink_audio
+
+         trans.src_video ! cea608overlay black-background=1 ! autovideosink
+         trans.src_audio ! autoaudiosink
+
     "#,
     )?
         .downcast::<gst::Pipeline>()
@@ -65,76 +30,20 @@ fn main() -> eyre::Result<()> {
 
     info!("Starting pipeline...");
 
-    let demuxer = pipeline.by_name("dec").unwrap();
+    let demuxer = pipeline.by_name("demuxer").unwrap();
     demuxer.connect_pad_added(|_, pad| {
         let name = pad.name();
         let caps = pad.caps().unwrap();
         let caps_type = caps.structure(0).unwrap().name();
-        debug!("Pad {} added with caps {}", name, caps_type);
+        info!("Pad {} added with caps {}", name, caps_type);
     });
 
-    let (mut socket, response) = connect(Url::parse("ws://localhost:2700").unwrap())?;
+    let transcriber = gst::ElementFactory::make("vosk_transcriber", None).expect("Could not instantiate Vosk transcriber");
+    let transcriberbin = pipeline.by_name("trans").expect("Trans bin");
+    // info!("setting prop");
+    transcriberbin.set_property("transcriber", transcriber);
+    // info!("prop set");
 
-    let config = Configuration::new(16_000);
-    info!(
-        "config payload: {}",
-        serde_json::to_string_pretty(&config).unwrap()
-    );
-    let packet = serde_json::to_string(&config).unwrap();
-    socket.write_message(Message::Text(packet)).unwrap();
-
-    let shared_socket = Arc::new(Mutex::new(socket));
-
-    let app_sink = pipeline
-        .by_name("sink")
-        .unwrap()
-        .downcast::<gst_app::AppSink>()
-        .unwrap();
-    app_sink.set_sync(false);
-    app_sink.set_callbacks(
-        gst_app::AppSinkCallbacks::builder()
-            .new_sample({
-                let shared_socket = shared_socket.clone();
-                move |app| {
-                    let sample = app.pull_sample().unwrap();
-                    let buffer = sample.buffer().unwrap();
-                    let data = buffer.map_readable().unwrap();
-
-                    let mut socket = shared_socket.lock().unwrap();
-
-                    for chunk in data.chunks(8_000) {
-                        socket
-                            .write_message(Message::Binary(chunk.to_vec()))
-                            .unwrap();
-
-                        let msg = socket.read_message().unwrap();
-                        match msg {
-                            Message::Text(payload) => {
-                                match serde_json::from_str::<Transcript>(&payload) {
-                                    Ok(transcript) => {
-                                        let text = transcript
-                                            .result
-                                            .iter()
-                                            .map(|p| p.word.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join(" ");
-                                        info!("result: {}", text);
-                                    }
-                                    Err(_) => {
-                                        // The payload is still not a final transcript, so we just ignore it
-                                        // info!("No results...");
-                                    }
-                                }
-                            }
-                            _ => {}
-                        };
-                    }
-
-                    Ok(gst::FlowSuccess::Ok)
-                }
-            })
-            .build(),
-    );
 
     let context = glib::MainContext::default();
     let main_loop = glib::MainLoop::new(Some(&context), false);
