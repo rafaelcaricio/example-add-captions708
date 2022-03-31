@@ -112,11 +112,13 @@ fn main() -> eyre::Result<()> {
                             Message::Text(payload) => {
                                 match serde_json::from_str::<Transcript>(&payload) {
                                     Ok(transcript) => {
-                                        info!(
-                                            "result: {}",
-                                            serde_json::to_string_pretty(&transcript.result)
-                                                .unwrap()
-                                        );
+                                        let text = transcript
+                                            .result
+                                            .iter()
+                                            .map(|p| p.word.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(" ");
+                                        info!("result: {}", text);
                                     }
                                     Err(_) => {
                                         // The payload is still not a final transcript, so we just ignore it
