@@ -16,9 +16,9 @@ fn main() -> eyre::Result<()> {
     let pipeline = gst::parse_launch(
         r#"
 
-        uridecodebin name=demuxer uri=file:///Users/rafael.caricio/fauci-interview.mp4
+        uridecodebin name=demuxer uri=file:///Users/rafael.caricio/video.mkv
 
-        demuxer. ! video/x-raw ! transcriberbin name=trans latency=30000
+        demuxer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! transcriberbin name=trans latency=30000
         demuxer. ! audio/x-raw ! audiorate ! audioconvert ! audioresample ! trans.sink_audio
 
         trans.src_video ! cea608overlay black-background=1 ! autovideosink
@@ -40,10 +40,8 @@ fn main() -> eyre::Result<()> {
     });
 
     let transcriber = gst::ElementFactory::make("vosk_transcriber", None).expect("Could not instantiate Vosk transcriber");
-    let transcriberbin = pipeline.by_name("trans").expect("Trans bin");
-    // info!("setting prop");
-    transcriberbin.set_property("transcriber", transcriber);
-    // info!("prop set");
+    let transcriber_bin = pipeline.by_name("trans").expect("Trans bin");
+    transcriber_bin.set_property("transcriber", transcriber);
 
 
     let context = glib::MainContext::default();
