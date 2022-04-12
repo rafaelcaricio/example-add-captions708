@@ -13,12 +13,14 @@ fn main() -> eyre::Result<()> {
     gstrsclosedcaption::plugin_register_static()?;
     gstvosk::plugin_register_static()?;
 
+    // demuxer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! transcriberbin name=trans
+    // trans.src_video ! cea608overlay black-background=1 ! autovideosink
     let pipeline = gst::parse_launch(
         r#"
 
         uridecodebin name=demuxer uri=file:///Users/rafael.caricio/video.mkv
 
-        demuxer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! transcriberbin name=trans latency=30000
+        demuxer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! transcriberbin name=trans
         demuxer. ! audio/x-raw ! audiorate ! audioconvert ! audioresample ! trans.sink_audio
 
         trans.src_video ! cea608overlay black-background=1 ! autovideosink
@@ -41,8 +43,8 @@ fn main() -> eyre::Result<()> {
 
     let transcriber = gst::ElementFactory::make("vosk_transcriber", None).expect("Could not instantiate Vosk transcriber");
     let transcriber_bin = pipeline.by_name("trans").expect("Trans bin");
-    transcriber_bin.set_property("transcriber", transcriber);
-
+    transcriber_bin.set_property("transcriber", &transcriber);
+    transcriber_bin.set_property("latency", 25_000_u32);
 
     let context = glib::MainContext::default();
     let main_loop = glib::MainLoop::new(Some(&context), false);
