@@ -13,13 +13,19 @@ fn main() -> eyre::Result<()> {
     gstrsclosedcaption::plugin_register_static()?;
     gstvosk::plugin_register_static()?;
 
+    // ristsrc name=rist_src address="0.0.0.0" ! rtpmp2tdepay name=rtmpdepay ! decodebin name=multiplexer
+    // uridecodebin name=demuxer uri=file:///Users/rafael.caricio/video.mkv
+    //
+    // demuxer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! ccextractor remove-caption-meta=true ! transcriberbin name=trans latency=30000
+    // demuxer. ! audio/x-raw ! audiorate ! audioconvert ! audioresample ! trans.sink_audio
+
     let pipeline = gst::parse_launch(
         r#"
 
-        uridecodebin name=demuxer uri=file:///Users/rafael.caricio/video.mkv
+        uridecodebin name=multiplexer uri=file:///Users/rafael.caricio/video.mkv
 
-        demuxer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! transcriberbin name=trans latency=30000
-        demuxer. ! audio/x-raw ! audiorate ! audioconvert ! audioresample ! trans.sink_audio
+        multiplexer. ! videorate ! video/x-raw,framerate=(fraction)30/1 ! ccextractor remove-caption-meta=true ! trans.sink_video
+        multiplexer. ! audio/x-raw ! audiorate ! audioconvert ! audioresample ! transcriberbin name=trans
 
         trans.src_video ! cea608overlay black-background=1 ! autovideosink
         trans.src_audio ! autoaudiosink
@@ -31,17 +37,20 @@ fn main() -> eyre::Result<()> {
 
     info!("Starting pipeline...");
 
-    let demuxer = pipeline.by_name("demuxer").unwrap();
-    demuxer.connect_pad_added(|_, pad| {
-        let name = pad.name();
-        let caps = pad.caps().unwrap();
-        let caps_type = caps.structure(0).unwrap().name();
-        info!("Pad {} added with caps {}", name, caps_type);
-    });
+    // let demuxer = pipeline.by_name("demuxer").unwrap();
+    // demuxer.connect_pad_added(|_, pad| {
+    //     let name = pad.name();
+    //     let caps = pad.caps().unwrap();
+    //     let caps_type = caps.structure(0).unwrap().name();
+    //     info!("Pad {} added with caps {}", name, caps_type);
+    // });
 
-    let transcriber = gst::ElementFactory::make("vosk_transcriber", None).expect("Could not instantiate Vosk transcriber");
+    let transcriber = gst::ElementFactory::make("gspeechtotext", None).expect("Could not instantiate Google transcriber");
+    transcriber.set_property("auth-json-file",
+                             "/Users/rafael.caricio/development/live/google-cloud-playground/i-centralvideo-dictate-dev-c184dd68967a.json");
     let transcriber_bin = pipeline.by_name("trans").expect("Trans bin");
     transcriber_bin.set_property("transcriber", transcriber);
+    transcriber_bin.set_property("latency", 45_000_u32);
 
 
     let context = glib::MainContext::default();
