@@ -63,7 +63,7 @@ fn main() -> eyre::Result<()> {
     let ad_event_counter = Arc::new(Mutex::new(1u32));
 
     // Every 90 seconds we will loop on an ad scheduling process..
-    glib::timeout_add(Duration::from_secs(90), {
+    glib::timeout_add(Duration::from_secs(60), {
         let pipeline_weak = pipeline.downgrade();
         let ad_event_counter = ad_event_counter.clone();
         move || {
@@ -96,7 +96,7 @@ fn main() -> eyre::Result<()> {
                 // the stream can go back to normal programming. This is not strictly necessary
                 // since we are saying how long our splice out should be, but it is good
                 // to have this indication anyway.
-                glib::timeout_add(ad_duration.into(), {
+                glib::timeout_add(Duration::from_secs(30), {
                     let muxer_weak = muxer.downgrade();
                     let ad_event_counter = ad_event_counter.clone();
                     move || {
@@ -108,7 +108,7 @@ fn main() -> eyre::Result<()> {
                                 *ad_event_counter
                             };
                             let now = muxer.current_running_time().unwrap();
-                            send_splice_in(&muxer, event_id, now + ahead);
+                            send_splice_in(&muxer, event_id, now + ahead + ad_duration);
                         }
                         // This don't need to run again
                         glib::Continue(false)
