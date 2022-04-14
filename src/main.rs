@@ -38,7 +38,7 @@ fn send_splice_out(
 }
 
 fn main() -> eyre::Result<()> {
-    pretty_env_logger::init();
+    pretty_env_logger::init_timed();
     gst::init()?;
     unsafe {
         gst_mpegts::gst_mpegts_initialize();
@@ -60,7 +60,7 @@ fn main() -> eyre::Result<()> {
 
     info!("Starting pipeline...");
 
-    let ad_event_counter = Arc::new(Mutex::new(1u32));
+    let ad_event_counter = Arc::new(Mutex::new(0u32));
 
     // Every 90 seconds we will loop on an ad scheduling process..
     glib::timeout_add(Duration::from_secs(60), {
@@ -77,8 +77,6 @@ fn main() -> eyre::Result<()> {
                 // How much ahead should the ad be inserted, we say 5 seconds in the future
                 let ahead = gst::ClockTime::from_seconds(5);
 
-                // Schedule an advertisement in 5 seconds from now with a 10s duration
-                let ad_duration = gst::ClockTime::from_seconds(10);
                 // next event id
                 let event_id =  {
                     let mut ad_event_counter = ad_event_counter.lock().unwrap();
@@ -89,13 +87,11 @@ fn main() -> eyre::Result<()> {
                     &muxer,
                     event_id,
                     now + ahead,
-                    ad_duration.clone(),
+                    gst::ClockTime::from_seconds(10), // Just an indicative, but the Splice In is the actual decision
                 );
 
-                // Now we add a timed call for 30 seconds from now to indicate via splice in that
-                // the stream can go back to normal programming. This is not strictly necessary
-                // since we are saying how long our splice out should be, but it is good
-                // to have this indication anyway.
+                // Now we add a timed call for the duration of the ad from now to indicate via
+                // splice in that the stream can go back to normal programming.
                 glib::timeout_add(Duration::from_secs(30), {
                     let muxer_weak = muxer.downgrade();
                     let ad_event_counter = ad_event_counter.clone();
@@ -108,7 +104,7 @@ fn main() -> eyre::Result<()> {
                                 *ad_event_counter
                             };
                             let now = muxer.current_running_time().unwrap();
-                            send_splice_in(&muxer, event_id, now + ahead + ad_duration);
+                            send_splice_in(&muxer, event_id, now + ahead);
                         }
                         // This don't need to run again
                         glib::Continue(false)
