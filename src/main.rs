@@ -1,9 +1,9 @@
+use gst::prelude::*;
+use log::info;
 use std::fs::File;
 use std::io::Write;
 use std::process;
 use std::sync::{Arc, Mutex};
-use gst::prelude::*;
-use log::info;
 use std::time::Duration;
 
 fn send_splice<C>(element: &gst::Element, gst_sit: C)
@@ -25,15 +25,14 @@ fn send_splice_in(element: &gst::Element, event_id: u32, time: gst::ClockTime) {
     })
 }
 
-fn send_splice_out(
-    element: &gst::Element,
-    event_id: u32,
-    time: gst::ClockTime,
-    duration: gst::ClockTime,
-) {
-    info!("Sending Splice Out event: {} @ {} for {}", event_id, time.display(), duration.display());
+fn send_splice_out(element: &gst::Element, event_id: u32, time: gst::ClockTime) {
+    info!(
+        "Sending Splice Out event: {} @ {}",
+        event_id,
+        time.display()
+    );
     send_splice(element, || unsafe {
-        gst_mpegts::gst_mpegts_scte_splice_out_new(event_id, time.nseconds(), duration.nseconds())
+        gst_mpegts::gst_mpegts_scte_splice_out_new(event_id, time.nseconds(), 0)
     })
 }
 
@@ -75,20 +74,15 @@ fn main() -> eyre::Result<()> {
                 let now = pipeline.current_running_time().unwrap();
 
                 // How much ahead should the ad be inserted, we say 5 seconds in the future
-                let ahead = gst::ClockTime::from_seconds(5);
+                let ahead = gst::ClockTime::from_seconds(0);
 
                 // next event id
-                let event_id =  {
+                let event_id = {
                     let mut ad_event_counter = ad_event_counter.lock().unwrap();
                     *ad_event_counter += 1;
                     *ad_event_counter
                 };
-                send_splice_out(
-                    &muxer,
-                    event_id,
-                    now + ahead,
-                    gst::ClockTime::from_seconds(10), // Just an indicative, but the Splice In is the actual decision
-                );
+                send_splice_out(&muxer, event_id, now + ahead);
 
                 // Now we add a timed call for the duration of the ad from now to indicate via
                 // splice in that the stream can go back to normal programming.
@@ -98,7 +92,7 @@ fn main() -> eyre::Result<()> {
                     move || {
                         if let Some(muxer) = muxer_weak.upgrade() {
                             // next event id
-                            let event_id =  {
+                            let event_id = {
                                 let mut ad_event_counter = ad_event_counter.lock().unwrap();
                                 *ad_event_counter += 1;
                                 *ad_event_counter
@@ -110,13 +104,11 @@ fn main() -> eyre::Result<()> {
                         glib::Continue(false)
                     }
                 });
-
             }
             // Run this again next time...
             glib::Continue(true)
         }
     });
-
 
     let context = glib::MainContext::default();
     let main_loop = glib::MainLoop::new(Some(&context), false);
@@ -154,7 +146,6 @@ fn main() -> eyre::Result<()> {
         move || {
             if let Some(pipeline) = pipeline_weak.upgrade() {
                 pipeline.call_async(|itself| {
-
                     let dot_graph = itself
                         .debug_to_dot_data(gst::DebugGraphDetails::all())
                         .to_string();
