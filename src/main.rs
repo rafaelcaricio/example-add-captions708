@@ -4,6 +4,7 @@ use log::{debug, info};
 use std::fs::File;
 use std::io::Write;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,10 +54,10 @@ impl EventId {
     }
 }
 
-
 fn main() -> eyre::Result<()> {
     pretty_env_logger::init_timed();
     gst::init()?;
+    gstvideofx::plugin_register_static()?;
     unsafe {
         gst_mpegts::gst_mpegts_initialize();
     }
@@ -65,60 +66,18 @@ fn main() -> eyre::Result<()> {
     let pipeline = gst::parse_launch(
         r#"
 
-        audiotestsrc is-live=true ! audioconvert ! avenc_aac bitrate=128000 ! queue ! mux.
+        urisourcebin uri=https://plutolive-msl.akamaized.net/hls/live/2008623/defy/master.m3u8 ! tsdemux name=demux ! queue ! h264parse ! tee name=v
 
-        videotestsrc is-live=true ! video/x-raw,framerate=30/1,width=1280,height=720 ! timeoverlay ! x264enc tune=zerolatency name=encoder
+        v. ! queue ! mpegtsmux name=mux scte-35-pid=500 scte-35-null-interval=450000 ! filesink sync=true location=video.ts
+        v. ! queue ! decodebin ! videoconvert ! imgcmp name=imgcmp location=/Users/rafaelcaricio/Downloads/defy-AD-SLATE-APRIL3022.jpeg ! autovideosink
 
-        encoder. ! video/x-h264,profile=main ! queue ! mpegtsmux name=mux scte-35-pid=500 scte-35-null-interval=450000
-
-        mux. ! filesink sync=true location=out.ts
-
+        demux. ! queue ! aacparse ! mux.
     "#,
     )?
         .downcast::<gst::Pipeline>()
         .unwrap();
 
     info!("Starting pipeline...");
-
-    let event_counter = EventId::new();
-
-    // Every 60 seconds we will loop on an ad scheduling process..
-    glib::timeout_add(Duration::from_secs(60), {
-        let pipeline_weak = pipeline.downgrade();
-        let event_counter = event_counter.clone();
-        move || {
-            if let Some(pipeline) = pipeline_weak.upgrade() {
-                let muxer = pipeline.by_name("mux").unwrap();
-
-                // We need to notify a specific time in the stream where the SCTE-35 marker
-                // is, so we use the pipeline running time to base our timing calculations
-                let now = pipeline.current_running_time().unwrap();
-
-                // How much ahead should the ad be inserted, we say 0 seconds in the future (immediate)
-                let ahead = gst::ClockTime::from_seconds(0);
-
-                // Trigger the Splice Out event in the SCTE-35 stream
-                send_splice_out(&muxer, event_counter.next(), now + ahead);
-
-                // Now we add a timed call for the duration of the ad from now to indicate via
-                // splice in that the stream can go back to normal programming.
-                glib::timeout_add(Duration::from_secs(30), {
-                    let muxer_weak = muxer.downgrade();
-                    let event_counter = event_counter.clone();
-                    move || {
-                        if let Some(muxer) = muxer_weak.upgrade() {
-                            let now = muxer.current_running_time().unwrap();
-                            send_splice_in(&muxer, event_counter.next(), now + ahead);
-                        }
-                        // This shall not run again
-                        glib::Continue(false)
-                    }
-                });
-            }
-            // Run this again after the timeout...
-            glib::Continue(true)
-        }
-    });
 
     let context = glib::MainContext::default();
     let main_loop = glib::MainLoop::new(Some(&context), false);
@@ -127,8 +86,12 @@ fn main() -> eyre::Result<()> {
 
     let bus = pipeline.bus().unwrap();
     bus.add_watch({
+        let event_counter = EventId::new();
+        let ad_running = Arc::new(AtomicBool::new(false));
         let main_loop = main_loop.clone();
         let pipeline_weak = pipeline.downgrade();
+        let imgcmp_weak = pipeline.by_name("imgcmp").unwrap().downgrade();
+        let muxer_weak = pipeline.by_name("mux").unwrap().downgrade();
         move |_, msg| {
             use gst::MessageView;
 
@@ -149,11 +112,54 @@ fn main() -> eyre::Result<()> {
                         if s.src().map(|e| e == pipeline).unwrap_or(false) {
                             debug!("Writing dot file for status: {:?}", s.current());
 
-                            let mut file = File::create(format!("Pipeline-{:?}.dot", s.current())).unwrap();
-                            let dot_data = pipeline.debug_to_dot_data(
-                                gst::DebugGraphDetails::all(),
-                            );
+                            let mut file =
+                                File::create(format!("Pipeline-{:?}.dot", s.current())).unwrap();
+                            let dot_data =
+                                pipeline.debug_to_dot_data(gst::DebugGraphDetails::all());
                             file.write_all(dot_data.as_bytes()).unwrap();
+                        }
+                    }
+                }
+                MessageView::Element(elem_msg) => {
+                    if let (Some(pipeline), Some(imgcmp), Some(muxer)) = (
+                        pipeline_weak.upgrade(),
+                        imgcmp_weak.upgrade(),
+                        muxer_weak.upgrade(),
+                    ) {
+                        info!("Element Message: {:?}", elem_msg);
+                        if elem_msg.src().map(|e| e == imgcmp).unwrap_or(false)
+                            && elem_msg.message().has_name("image-detected")
+                            && !ad_running.load(Ordering::Relaxed)
+                        {
+                            // We need to notify a specific time in the stream where the SCTE-35 marker
+                            // is, so we use the pipeline running time to base our timing calculations
+                            let now = pipeline.current_running_time().unwrap();
+
+                            // How much ahead should the ad be inserted, we say 0 seconds in the future (immediate)
+                            let ahead = gst::ClockTime::from_seconds(0);
+
+                            // Trigger the Splice Out event in the SCTE-35 stream
+                            send_splice_out(&muxer, event_counter.next(), now + ahead);
+                            ad_running.store(true, Ordering::Relaxed);
+                            info!("Ad started..");
+
+                            // Now we add a timed call for the duration of the ad from now to indicate via
+                            // splice in that the stream can go back to normal programming.
+                            glib::timeout_add(Duration::from_secs(30), {
+                                let muxer_weak = muxer.downgrade();
+                                let event_counter = event_counter.clone();
+                                let ad_running = Arc::clone(&ad_running);
+                                move || {
+                                    if let Some(muxer) = muxer_weak.upgrade() {
+                                        let now = muxer.current_running_time().unwrap();
+                                        send_splice_in(&muxer, event_counter.next(), now + ahead);
+                                        ad_running.store(false, Ordering::Relaxed);
+                                        info!("Ad ended!")
+                                    }
+                                    // This shall not run again
+                                    glib::Continue(false)
+                                }
+                            });
                         }
                     }
                 }
@@ -174,6 +180,11 @@ fn main() -> eyre::Result<()> {
 
     main_loop.run();
     bus.remove_watch().unwrap();
+
+    debug!("Writing Final dot file");
+    let mut file = File::create("Pipeline-Final.dot").unwrap();
+    let dot_data = pipeline.debug_to_dot_data(gst::DebugGraphDetails::all());
+    file.write_all(dot_data.as_bytes()).unwrap();
 
     pipeline.set_state(gst::State::Null)?;
 
