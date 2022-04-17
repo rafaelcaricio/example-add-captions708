@@ -377,6 +377,7 @@ dependencies = [
 [[package]]
 name = "gst-plugin-version-helper"
 version = "0.9.0"
+source = "git+https://gitlab.freedesktop.org/rafaelcaricio/gst-plugins-rs.git?branch=add-imgcmp#490f1ac8c9014af0e968f2ecd50d4430ab34fa11"
 dependencies = [
  "chrono",
 ]
@@ -384,6 +385,7 @@ dependencies = [
 [[package]]
 name = "gst-plugin-videofx"
 version = "0.9.0"
+source = "git+https://gitlab.freedesktop.org/rafaelcaricio/gst-plugins-rs.git?branch=add-imgcmp#490f1ac8c9014af0e968f2ecd50d4430ab34fa11"
 dependencies = [
  "atomic_refcell",
  "cairo-rs",

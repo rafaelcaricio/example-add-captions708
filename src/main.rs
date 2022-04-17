@@ -3,7 +3,6 @@ use gst::prelude::*;
 use log::{debug, info};
 use std::fs::File;
 use std::io::Write;
-use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,14 +38,10 @@ fn send_splice_out(element: &gst::Element, event_id: u32, time: gst::ClockTime) 
     })
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct EventId(Arc<Mutex<u32>>);
 
 impl EventId {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(0)))
-    }
-
     pub fn next(&self) -> u32 {
         let mut counter = self.0.lock().unwrap();
         *counter += 1;
@@ -62,13 +57,13 @@ fn main() -> eyre::Result<()> {
         gst_mpegts::gst_mpegts_initialize();
     }
 
-    // ! rtpmp2tpay ! udpsink sync=true host=184.73.103.62 port=5000
+    //  ! filesink sync=true location=video.ts
     let pipeline = gst::parse_launch(
         r#"
 
         urisourcebin uri=https://plutolive-msl.akamaized.net/hls/live/2008623/defy/master.m3u8 ! tsdemux name=demux ! queue ! h264parse ! tee name=v
 
-        v. ! queue ! mpegtsmux name=mux scte-35-pid=500 scte-35-null-interval=450000 ! filesink sync=true location=video.ts
+        v. ! queue ! mpegtsmux name=mux scte-35-pid=500 scte-35-null-interval=450000 ! rtpmp2tpay ! udpsink sync=true host=54.225.215.79 port=5000
         v. ! queue ! decodebin ! videoconvert ! imgcmp name=imgcmp location=/Users/rafaelcaricio/Downloads/defy-AD-SLATE-APRIL3022.jpeg ! autovideosink
 
         demux. ! queue ! aacparse ! mux.
@@ -86,7 +81,7 @@ fn main() -> eyre::Result<()> {
 
     let bus = pipeline.bus().unwrap();
     bus.add_watch({
-        let event_counter = EventId::new();
+        let event_counter = EventId::default();
         let ad_running = Arc::new(AtomicBool::new(false));
         let main_loop = main_loop.clone();
         let pipeline_weak = pipeline.downgrade();
