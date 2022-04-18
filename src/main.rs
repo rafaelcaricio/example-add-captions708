@@ -1,11 +1,13 @@
 use glib::translate::ToGlibPtr;
 use gst::prelude::*;
-use log::{debug, info};
+use log::{debug, info, trace};
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use clap::Parser;
+use url::Url;
 
 fn send_splice<C>(element: &gst::Element, gst_sit: C)
 where
@@ -49,6 +51,30 @@ impl EventId {
     }
 }
 
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Configuration {
+    /// HLS input source of the stream
+    #[clap(short='s', long)]
+    hls_source_url: String,
+
+    /// RTP destination for the stream
+    #[clap(short='d', long)]
+    rtp_destination_url: String,
+
+    /// Image of the frame used as reference to trigger the SCTE35 event
+    #[clap(short='i', long)]
+    slate_image_path: String,
+
+    /// The SCTE35 stream PID
+    #[clap(short='p', long, default_value="500")]
+    scte_pid: u32,
+
+    /// The duration of the SCTE35 Splice event in seconds
+    #[clap(short='d', long)]
+    scte_duration_secs: u64,
+}
+
 fn main() -> eyre::Result<()> {
     pretty_env_logger::init_timed();
     gst::init()?;
@@ -57,14 +83,15 @@ fn main() -> eyre::Result<()> {
         gst_mpegts::gst_mpegts_initialize();
     }
 
-    //  ! filesink sync=true location=video.ts
+    let conf: Configuration = Configuration::parse();
+
     let pipeline = gst::parse_launch(
         r#"
 
-        urisourcebin uri=https://plutolive-msl.akamaized.net/hls/live/2008623/defy/master.m3u8 ! tsdemux name=demux ! queue ! h264parse ! tee name=v
+        urisourcebin name=source ! tsdemux name=demux ! queue ! h264parse ! tee name=v
 
-        v. ! queue ! mpegtsmux name=mux scte-35-pid=500 scte-35-null-interval=450000 ! rtpmp2tpay ! udpsink sync=true host=54.225.215.79 port=5000
-        v. ! queue ! decodebin ! videoconvert ! imgcmp name=imgcmp location=/Users/rafaelcaricio/Downloads/defy-AD-SLATE-APRIL3022.jpeg ! autovideosink
+        v. ! queue ! mpegtsmux name=mux scte-35-null-interval=450000 ! rtpmp2tpay ! udpsink name=rtpsink sync=true
+        v. ! queue ! decodebin ! videoconvert ! imgcmp name=imgcmp ! autovideosink
 
         demux. ! queue ! aacparse ! mux.
     "#,
@@ -73,6 +100,28 @@ fn main() -> eyre::Result<()> {
         .unwrap();
 
     info!("Starting pipeline...");
+
+    // Set the HLS source URL
+    let source = pipeline.by_name("source").unwrap();
+    source.set_property("uri", conf.hls_source_url);
+
+    // Set SCTE35 stream PID
+    let mux = pipeline.by_name("mux").unwrap();
+    mux.set_property("scte-35-pid", conf.scte_pid);
+
+    // Set the frame we are searching for
+    let imgcmp = pipeline.by_name("imgcmp").unwrap();
+    imgcmp.set_property("location", conf.slate_image_path);
+
+    // Set the RTP destination
+    let rtp_url = Url::parse(&conf.rtp_destination_url).expect("Valid URL in format rtp://<host>:<port>");
+    let rtp_sink = pipeline.by_name("rtpsink").unwrap();
+    rtp_sink.set_properties(&[
+        ("host", &rtp_url.host_str().unwrap().to_string()),
+        ("port", &(rtp_url.port().unwrap() as i32)),
+        // In order to make sure the slate image is not event visible, we delay 1 second
+        ("ts-offset", &(gst::ClockTime::from_seconds(1).nseconds() as i64)),
+    ]);
 
     let context = glib::MainContext::default();
     let main_loop = glib::MainLoop::new(Some(&context), false);
@@ -83,10 +132,12 @@ fn main() -> eyre::Result<()> {
     bus.add_watch({
         let event_counter = EventId::default();
         let ad_running = Arc::new(AtomicBool::new(false));
+        let ad_duration = Duration::from_secs(conf.scte_duration_secs);
+
         let main_loop = main_loop.clone();
         let pipeline_weak = pipeline.downgrade();
-        let imgcmp_weak = pipeline.by_name("imgcmp").unwrap().downgrade();
-        let muxer_weak = pipeline.by_name("mux").unwrap().downgrade();
+        let imgcmp_weak = imgcmp.downgrade();
+        let muxer_weak = mux.downgrade();
         move |_, msg| {
             use gst::MessageView;
 
@@ -121,7 +172,7 @@ fn main() -> eyre::Result<()> {
                         imgcmp_weak.upgrade(),
                         muxer_weak.upgrade(),
                     ) {
-                        info!("Element Message: {:?}", elem_msg);
+                        trace!("Element Message: {:?}", elem_msg);
                         if elem_msg.src().map(|e| e == imgcmp).unwrap_or(false)
                             && elem_msg.message().has_name("image-detected")
                             && !ad_running.load(Ordering::Relaxed)
@@ -130,24 +181,21 @@ fn main() -> eyre::Result<()> {
                             // is, so we use the pipeline running time to base our timing calculations
                             let now = pipeline.current_running_time().unwrap();
 
-                            // How much ahead should the ad be inserted, we say 0 seconds in the future (immediate)
-                            let ahead = gst::ClockTime::from_seconds(0);
-
                             // Trigger the Splice Out event in the SCTE-35 stream
-                            send_splice_out(&muxer, event_counter.next(), now + ahead);
+                            send_splice_out(&muxer, event_counter.next(), now);
                             ad_running.store(true, Ordering::Relaxed);
                             info!("Ad started..");
 
                             // Now we add a timed call for the duration of the ad from now to indicate via
                             // splice in that the stream can go back to normal programming.
-                            glib::timeout_add(Duration::from_secs(30), {
+                            glib::timeout_add(ad_duration, {
                                 let muxer_weak = muxer.downgrade();
                                 let event_counter = event_counter.clone();
                                 let ad_running = Arc::clone(&ad_running);
                                 move || {
                                     if let Some(muxer) = muxer_weak.upgrade() {
                                         let now = muxer.current_running_time().unwrap();
-                                        send_splice_in(&muxer, event_counter.next(), now + ahead);
+                                        send_splice_in(&muxer, event_counter.next(), now);
                                         ad_running.store(false, Ordering::Relaxed);
                                         info!("Ad ended!")
                                     }

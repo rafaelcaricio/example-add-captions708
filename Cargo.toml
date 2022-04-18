@@ -15,5 +15,7 @@ signal-hook = "0.3.13"
 #axum = "0.4.5"
 #tower = "0.4.12"
 #tower-http = { version = "0.2.2", features = ["add-extension"] }
+clap = { version = "3" , features = ["derive"] }
+url = "2"
 log = "0.4.14"
 pretty_env_logger = "0.4.0"
